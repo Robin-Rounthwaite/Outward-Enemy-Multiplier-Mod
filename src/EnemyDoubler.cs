@@ -59,8 +59,8 @@ namespace IncreasedEnemyCount
         {
             public string SceneName;
             public int CandidateCount;
-            public int Copies;
-            public HashSet<int> CopiedIndices = new HashSet<int>();
+            /// <summary>Candidate index -> how many copies were made of it.</summary>
+            public Dictionary<int, int> CopyCounts = new Dictionary<int, int>();
             public bool Reconciled;
         }
 
@@ -124,7 +124,7 @@ namespace IncreasedEnemyCount
                 return;
             }
 
-            if (settings.Copies > 0 && NetSync.IsOnline && NetSync.IsHost && Plugin.RequireModOnAllPlayers.Value)
+            if (settings.AnyCopies && NetSync.IsOnline && NetSync.IsHost && Plugin.RequireModOnAllPlayers.Value)
             {
                 var missing = NetSync.PlayersWithoutMod();
                 if (missing.Count > 0)
@@ -134,13 +134,12 @@ namespace IncreasedEnemyCount
                 }
             }
 
-            var state = new SceneState { SceneName = scene.name, CandidateCount = candidates.Count, Copies = settings.Copies };
+            var state = new SceneState { SceneName = scene.name, CandidateCount = candidates.Count };
             m_currentScene = state;
 
-            int copies = settings.Copies;
-            if (copies <= 0)
+            if (!settings.AnyCopies)
             {
-                NetSync.PublishArea(scene.name, settings, candidates.Count, state.CopiedIndices);
+                NetSync.PublishArea(scene.name, settings, candidates.Count, state.CopyCounts);
                 return;
             }
 
@@ -150,7 +149,8 @@ namespace IncreasedEnemyCount
             // ---- 3. Copy.
             var allocator = new ViewIDAllocator(FirstCopyOwnerFor(scene));
             var liveViews = GetLivePhotonViews();
-            int cloned = 0, skippedBoss = 0, skippedExcluded = 0, outOfIDs = 0;
+            int cloned = 0, skippedExcluded = 0, outOfIDs = 0;
+            var perCategory = new Dictionary<EnemyCategory, int>();
 
             // Inactive holder: anything instantiated under it does not Awake until re-parented.
             var holder = new GameObject("IncreasedEnemyCount_Holder");
@@ -163,35 +163,32 @@ namespace IncreasedEnemyCount
                 {
                     var original = candidates[i];
 
-                    // Network IDs are handed out for every candidate, whether or not it ends up
-                    // being copied. That way a different decision about one enemy on one machine
-                    // (e.g. a name-based check in another game language) can't shift the IDs of
-                    // every enemy after it.
+                    // Network IDs are reserved for the maximum number of copies of every candidate,
+                    // whatever its type or the sliders say. That way a different decision about one
+                    // enemy on one machine (e.g. name matching in another game language) can't shift
+                    // the IDs of every enemy after it.
                     int viewsPerCopy = CountViews(original);
-                    int[] ids = allocator.Take(viewsPerCopy * copies);
+                    int[] ids = allocator.Take(viewsPerCopy * EnemySettings.MAX_COPIES);
 
                     string name = SafeName(original);
                     float hp = SafeBaseMaxHealth(original);
-                    bool isBoss = IsBoss(original, settings, hp, out string bossReason);
-                    bool excluded = MatchesAnyName(original, settings.ExcludedNames);
+                    var category = Classify(original, settings, out string how);
+                    int copies = how == "excluded" ? 0 : settings.CopiesFor(category);
 
                     if (Plugin.LogEachEnemy.Value)
                     {
                         Plugin.Log.LogInfo($"[{scene.name}] {name} | HP {hp:0} | faction {original.Faction} | " +
-                                           (excluded ? "EXCLUDED" : isBoss ? $"BOSS ({bossReason})" : "normal") +
+                                           $"{category}{(how != null ? $" ({how})" : "")} | {copies} cop{(copies == 1 ? "y" : "ies")}" +
                                            (original.gameObject.activeInHierarchy ? "" : " | currently inactive"));
                     }
 
-                    if (excluded)
+                    if (how == "excluded")
                     {
                         skippedExcluded++;
                         continue;
                     }
-                    if (isBoss && !settings.IncludeBosses)
-                    {
-                        skippedBoss++;
+                    if (copies <= 0)
                         continue;
-                    }
                     if (ids == null)
                     {
                         outOfIDs++;
@@ -200,19 +197,20 @@ namespace IncreasedEnemyCount
                     if (string.IsNullOrEmpty(original.UID.Value) && NetSync.IsOnline)
                         continue; // its copies' UIDs couldn't be made to match across machines
 
-                    bool any = false;
+                    int made = 0;
                     for (int k = 1; k <= copies; k++)
                     {
                         var slice = new int[viewsPerCopy];
                         Array.Copy(ids, (k - 1) * viewsPerCopy, slice, 0, viewsPerCopy);
                         if (CreateClone(scene, holder.transform, original, i, k, copies, slice, settings.Spacing, liveViews))
-                        {
-                            cloned++;
-                            any = true;
-                        }
+                            made++;
                     }
-                    if (any)
-                        state.CopiedIndices.Add(i);
+                    if (made > 0)
+                    {
+                        state.CopyCounts[i] = made;
+                        cloned += made;
+                        perCategory[category] = (perCategory.TryGetValue(category, out int n) ? n : 0) + made;
+                    }
                 }
             }
             finally
@@ -220,9 +218,11 @@ namespace IncreasedEnemyCount
                 Destroy(holder);
             }
 
-            NetSync.PublishArea(scene.name, settings, candidates.Count, state.CopiedIndices);
+            NetSync.PublishArea(scene.name, settings, candidates.Count, state.CopyCounts);
 
-            Plugin.Log.LogMessage($"[{scene.name}] Enemies found: {candidates.Count}, copies created: {cloned}, bosses left alone: {skippedBoss}" +
+            int Cat(EnemyCategory c) => perCategory.TryGetValue(c, out int n) ? n : 0;
+            Plugin.Log.LogMessage($"[{scene.name}] Enemies found: {candidates.Count}, copies created: {cloned} " +
+                                  $"(standard {Cat(EnemyCategory.Standard)}, unique {Cat(EnemyCategory.Unique)}, bosses {Cat(EnemyCategory.Boss)})" +
                                   (skippedExcluded > 0 ? $", excluded by name: {skippedExcluded}" : "") + ".");
             if (outOfIDs > 0)
                 Plugin.Log.LogWarning($"[{scene.name}] Ran out of network IDs for this area: {outOfIDs} enemies weren't copied.");
@@ -262,25 +262,30 @@ namespace IncreasedEnemyCount
             return true;
         }
 
-        private static bool IsBoss(Character c, EnemySettings s, float hp, out string reason)
+        /// <summary>
+        /// Standard, Unique or Boss. "Never copy" keywords win, then "Always standard" keywords,
+        /// then the wiki lists. <paramref name="how"/> is "excluded", "always standard", "wiki list" or null.
+        /// </summary>
+        private static EnemyCategory Classify(Character c, EnemySettings s, out string how)
         {
-            reason = null;
-            if (s.QuestTargetsAreBosses && c.GetComponent<QuestEventOnDeath>())
+            if (MatchesAnyName(c, s.ExcludedNames))
             {
-                reason = "quest target";
-                return true;
+                how = "excluded";
+                return EnemyCategory.Standard;
             }
-            if (s.BossHealthThreshold > 0f && hp >= s.BossHealthThreshold)
+
+            var listed = EnemyCategories.Lookup(SafeName(c));
+            if (listed == EnemyCategory.Standard)
+                listed = EnemyCategories.Lookup(f_name?.GetValue(c) as string);
+
+            if (MatchesAnyName(c, s.IncludedNames))
             {
-                reason = $"health >= {s.BossHealthThreshold:0}";
-                return true;
+                how = listed != EnemyCategory.Standard ? $"always standard, wiki says {listed}" : "always standard";
+                return EnemyCategory.Standard;
             }
-            if (MatchesAnyName(c, s.BossNameKeywords))
-            {
-                reason = "name keyword";
-                return true;
-            }
-            return false;
+
+            how = listed != EnemyCategory.Standard ? "wiki list" : null;
+            return listed;
         }
 
         /// <summary>Checks the displayed name and the game's internal names.</summary>
@@ -698,24 +703,28 @@ namespace IncreasedEnemyCount
             var state = m_currentScene;
             if (state == null || state.Reconciled || !NetSync.IsOnline || NetSync.IsHost)
                 return;
-            if (!NetSync.TryGetHostManifest(state.SceneName, out int hostCopies, out int hostCandidates, out var hostIndices))
+            if (!NetSync.TryGetHostManifest(state.SceneName, out int hostCandidates, out var hostCounts))
                 return;
 
             state.Reconciled = true;
 
-            if (hostCandidates != state.CandidateCount || hostCopies != state.Copies)
+            if (hostCandidates != state.CandidateCount)
             {
-                NetSync.Notify($"Your copy of this area doesn't match the host's ({state.CandidateCount} enemies x{state.Copies + 1} here, " +
-                               $"{hostCandidates} x{hostCopies + 1} on the host). Leave and re-enter the area. " +
+                NetSync.Notify($"Your copy of this area doesn't match the host's ({state.CandidateCount} enemies here, " +
+                               $"{hostCandidates} on the host). Leave and re-enter the area. " +
                                "If it keeps happening, check that everyone has the same mods.");
                 return;
             }
 
+            // Remove copies the host doesn't have (an enemy it didn't copy, or fewer copies of it).
             int removed = 0;
             for (int i = m_records.Count - 1; i >= 0; i--)
             {
                 var r = m_records[i];
-                if (r.SceneName != state.SceneName || hostIndices.Contains(r.CandidateIndex))
+                if (r.SceneName != state.SceneName)
+                    continue;
+                int hostCount = hostCounts.TryGetValue(r.CandidateIndex, out int hc) ? hc : 0;
+                if (r.CopyIndex <= hostCount)
                     continue;
                 if (r.Clone)
                     Destroy(r.Clone.gameObject);
@@ -726,13 +735,16 @@ namespace IncreasedEnemyCount
             }
 
             int missing = 0;
-            foreach (int i in hostIndices)
-                if (!state.CopiedIndices.Contains(i))
-                    missing++;
+            foreach (var kv in hostCounts)
+            {
+                int mine = state.CopyCounts.TryGetValue(kv.Key, out int m) ? m : 0;
+                if (kv.Value > mine)
+                    missing += kv.Value - mine;
+            }
 
             if (removed > 0 || missing > 0)
             {
-                Plugin.Log.LogWarning($"[{state.SceneName}] Matched the host's enemy copies: removed {removed} extra, {missing} enemies' copies are missing here.");
+                Plugin.Log.LogWarning($"[{state.SceneName}] Matched the host's enemy copies: removed {removed} extra, {missing} copies are missing here.");
                 if (missing > 0)
                     NetSync.Notify($"{missing} of the host's extra enemies couldn't be created on your side, so they may be invisible to you. " +
                                    "Make sure everyone uses the same game language and mods.");

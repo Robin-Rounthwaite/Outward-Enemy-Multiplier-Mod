@@ -9,32 +9,51 @@ namespace IncreasedEnemyCount
     /// </summary>
     internal sealed class EnemySettings
     {
-        private const string FORMAT = "1";
+        private const string FORMAT = "2";
         private const char SEP = '\u001f';
 
+        /// <summary>
+        /// Network IDs are reserved for this many copies of every candidate enemy, whatever the
+        /// sliders say, so IDs never depend on settings or on how an enemy was classified.
+        /// Matches the highest slider value (10x = 9 copies).
+        /// </summary>
+        public const int MAX_COPIES = 9;
+
         public bool Enabled;
-        public int Multiplier;
+        public int StandardMultiplier;
+        public int UniqueMultiplier;
+        public int BossMultiplier;
         public float Spacing;
         public string ExcludedNames;
-        public bool IncludeBosses;
-        public float BossHealthThreshold;
-        public string BossNameKeywords;
-        public bool QuestTargetsAreBosses;
+        public string IncludedNames;
 
-        public int Copies => Enabled ? Math.Max(0, Multiplier - 1) : 0;
+        public bool AnyCopies => Enabled && (StandardMultiplier > 1 || UniqueMultiplier > 1 || BossMultiplier > 1);
+
+        public int CopiesFor(EnemyCategory category)
+        {
+            if (!Enabled)
+                return 0;
+            int m;
+            switch (category)
+            {
+                case EnemyCategory.Boss: m = BossMultiplier; break;
+                case EnemyCategory.Unique: m = UniqueMultiplier; break;
+                default: m = StandardMultiplier; break;
+            }
+            return Math.Max(0, Math.Min(MAX_COPIES, m - 1));
+        }
 
         public static EnemySettings FromConfig()
         {
             return new EnemySettings
             {
                 Enabled = Plugin.Enabled.Value,
-                Multiplier = Plugin.EnemyMultiplier.Value,
+                StandardMultiplier = Plugin.StandardMultiplier.Value,
+                UniqueMultiplier = Plugin.UniqueMultiplier.Value,
+                BossMultiplier = Plugin.BossMultiplier.Value,
                 Spacing = Plugin.SpawnSpacing.Value,
                 ExcludedNames = Plugin.ExcludedNames.Value ?? "",
-                IncludeBosses = Plugin.IncludeBosses.Value,
-                BossHealthThreshold = Plugin.BossHealthThreshold.Value,
-                BossNameKeywords = Plugin.BossNameKeywords.Value ?? "",
-                QuestTargetsAreBosses = Plugin.QuestTargetsAreBosses.Value,
+                IncludedNames = Plugin.IncludedNames.Value ?? "",
             };
         }
 
@@ -52,13 +71,12 @@ namespace IncreasedEnemyCount
             {
                 FORMAT,
                 Enabled ? "1" : "0",
-                Multiplier.ToString(inv),
+                StandardMultiplier.ToString(inv),
+                UniqueMultiplier.ToString(inv),
+                BossMultiplier.ToString(inv),
                 Spacing.ToString("R", inv),
                 Clean(ExcludedNames),
-                IncludeBosses ? "1" : "0",
-                BossHealthThreshold.ToString("R", inv),
-                Clean(BossNameKeywords),
-                QuestTargetsAreBosses ? "1" : "0",
+                Clean(IncludedNames),
             });
         }
 
@@ -69,19 +87,18 @@ namespace IncreasedEnemyCount
             try
             {
                 var p = data.Split(SEP);
-                if (p.Length < 9 || p[0] != FORMAT)
+                if (p.Length < 8 || p[0] != FORMAT)
                     return null;
                 var inv = CultureInfo.InvariantCulture;
                 return new EnemySettings
                 {
                     Enabled = p[1] == "1",
-                    Multiplier = int.Parse(p[2], inv),
-                    Spacing = float.Parse(p[3], inv),
-                    ExcludedNames = p[4],
-                    IncludeBosses = p[5] == "1",
-                    BossHealthThreshold = float.Parse(p[6], inv),
-                    BossNameKeywords = p[7],
-                    QuestTargetsAreBosses = p[8] == "1",
+                    StandardMultiplier = int.Parse(p[2], inv),
+                    UniqueMultiplier = int.Parse(p[3], inv),
+                    BossMultiplier = int.Parse(p[4], inv),
+                    Spacing = float.Parse(p[5], inv),
+                    ExcludedNames = p[6],
+                    IncludedNames = p[7],
                 };
             }
             catch
@@ -93,7 +110,7 @@ namespace IncreasedEnemyCount
         public override string ToString()
         {
             return Enabled
-                ? $"x{Multiplier}, bosses {(IncludeBosses ? "included" : "excluded")}"
+                ? $"standard x{StandardMultiplier}, unique x{UniqueMultiplier}, bosses x{BossMultiplier}"
                 : "off";
         }
 

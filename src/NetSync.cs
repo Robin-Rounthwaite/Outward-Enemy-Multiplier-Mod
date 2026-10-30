@@ -23,7 +23,7 @@ namespace IncreasedEnemyCount
     /// </summary>
     internal static class NetSync
     {
-        public const string PROTOCOL = "2"; // bump whenever copies would come out differently (IDs, UIDs, order)
+        public const string PROTOCOL = "3"; // bump whenever copies would come out differently (IDs, UIDs, order)
 
         private const string KEY_CFG = "iec.cfg";
         private const string KEY_AREA = "iec.area";
@@ -86,22 +86,27 @@ namespace IncreasedEnemyCount
             return null;
         }
 
-        /// <summary>Host: record what was done for an area so other players can match it.</summary>
-        public static void PublishArea(string sceneName, EnemySettings used, int candidateCount, ICollection<int> copiedIndices)
+        /// <summary>
+        /// Host: record what was done for an area so other players can match it.
+        /// Manifest format: scene | candidate count | index:copies,index:copies,...
+        /// </summary>
+        public static void PublishArea(string sceneName, EnemySettings used, int candidateCount, IDictionary<int, int> copyCounts)
         {
             if (!IsOnline || !PhotonNetwork.isMasterClient)
                 return;
             try
             {
+                var inv = CultureInfo.InvariantCulture;
                 var manifest = new System.Text.StringBuilder();
                 manifest.Append(sceneName).Append(SEP)
-                        .Append(used.Copies.ToString(CultureInfo.InvariantCulture)).Append(SEP)
-                        .Append(candidateCount.ToString(CultureInfo.InvariantCulture)).Append(SEP);
+                        .Append(candidateCount.ToString(inv)).Append(SEP);
                 bool first = true;
-                foreach (int i in copiedIndices)
+                foreach (var kv in copyCounts)
                 {
+                    if (kv.Value <= 0)
+                        continue;
                     if (!first) manifest.Append(',');
-                    manifest.Append(i.ToString(CultureInfo.InvariantCulture));
+                    manifest.Append(kv.Key.ToString(inv)).Append(':').Append(kv.Value.ToString(inv));
                     first = false;
                 }
 
@@ -120,12 +125,11 @@ namespace IncreasedEnemyCount
             }
         }
 
-        /// <summary>Client: what the host copied in this area, once the host has published it.</summary>
-        public static bool TryGetHostManifest(string sceneName, out int copies, out int candidateCount, out HashSet<int> copiedIndices)
+        /// <summary>Client: what the host copied in this area (enemy index -> copies), once published.</summary>
+        public static bool TryGetHostManifest(string sceneName, out int candidateCount, out Dictionary<int, int> copyCounts)
         {
-            copies = 0;
             candidateCount = 0;
-            copiedIndices = null;
+            copyCounts = null;
             if (!IsOnline || PhotonNetwork.isMasterClient)
                 return false;
 
@@ -133,16 +137,21 @@ namespace IncreasedEnemyCount
             if (string.IsNullOrEmpty(raw))
                 return false;
             var p = raw.Split(SEP);
-            if (p.Length < 4 || p[0] != sceneName)
+            if (p.Length < 3 || p[0] != sceneName)
                 return false;
             try
             {
-                copies = int.Parse(p[1], CultureInfo.InvariantCulture);
-                candidateCount = int.Parse(p[2], CultureInfo.InvariantCulture);
-                copiedIndices = new HashSet<int>();
-                if (p[3].Length > 0)
-                    foreach (var s in p[3].Split(','))
-                        copiedIndices.Add(int.Parse(s, CultureInfo.InvariantCulture));
+                var inv = CultureInfo.InvariantCulture;
+                candidateCount = int.Parse(p[1], inv);
+                copyCounts = new Dictionary<int, int>();
+                if (p[2].Length > 0)
+                {
+                    foreach (var entry in p[2].Split(','))
+                    {
+                        var kv = entry.Split(':');
+                        copyCounts[int.Parse(kv[0], inv)] = int.Parse(kv[1], inv);
+                    }
+                }
                 return true;
             }
             catch

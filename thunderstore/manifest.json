@@ -1,0 +1,9 @@
+{
+  "name": "IncreasedEnemyCount",
+  "version_number": "1.1.0",
+  "website_url": "https://github.com/Robin-Rounthwaite/Outward-Enemy-Multiplier-Mod",
+  "description": "Multiplies the number of enemies in every encounter (up to 10x), with separate sliders for standard enemies, unique enemies and bosses. Works in co-op, including Raid Mode parties, when everyone has the mod.",
+  "dependencies": [
+    "BepInEx-BepInExPack_Outward-5.4.19"
+  ]
+}
