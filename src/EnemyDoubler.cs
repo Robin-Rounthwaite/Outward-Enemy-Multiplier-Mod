@@ -16,6 +16,10 @@ namespace IncreasedEnemyCount
     /// those placed enemies the moment the scene finishes loading - after Awake, before Start.
     /// The copy is made under an inactive holder so none of its scripts run until its identity
     /// (UID, network view ID, etc.) has been made unique.
+    ///
+    /// Everything here is deterministic: given the same scene and the same settings, every
+    /// player's machine produces the same copies with the same UIDs and network view IDs. That is
+    /// what makes online co-op work (see NetSync).
     /// </summary>
     public class EnemyDoubler : MonoBehaviour
     {
@@ -23,24 +27,55 @@ namespace IncreasedEnemyCount
 
         private const string CLONE_SUFFIX = "_x";
 
+        /// <summary>
+        /// Photon reads a view ID as (creating player number x 1000) + slot. The game, other mods and
+        /// real players only ever use small player numbers, so copies get IDs in blocks belonging to
+        /// player numbers from 2,000,000 up, which can never exist (Photon numbers players from 1,
+        /// one per join). Each area gets its own run of 1,000 such numbers (up to 999,000 IDs), so
+        /// copies from the previous area that are still being unloaded can never clash.
+        /// The copies' owner is then set to 0, the same as the area's own enemies, so the host
+        /// controls them and they don't belong to any real player.
+        /// </summary>
+        private const int COPY_OWNER_BASE = 2000000;
+        private const int OWNERS_PER_AREA = 1000;
+        private const int AREA_BLOCKS = 100; // 2,000,000 + 100 x 1,000 owners -> IDs stay below int.MaxValue
+
         private class CloneRecord
         {
+            public string SceneName;
+            public int CandidateIndex;
             public Character Original;
             public Character Clone;
             public string OriginalUID;
             public string CloneUID;
             public Vector3 Offset;
+            public float Spacing;
+            public int CopyIndex;
+            public int TotalCopies;
             public bool OriginalWasActive;
+        }
+
+        private class SceneState
+        {
+            public string SceneName;
+            public int CandidateCount;
+            public int Copies;
+            public HashSet<int> CopiedIndices = new HashSet<int>();
+            public bool Reconciled;
         }
 
         private readonly List<CloneRecord> m_records = new List<CloneRecord>();
         private readonly Dictionary<string, CloneRecord> m_recordsByCloneUID = new Dictionary<string, CloneRecord>();
+        private SceneState m_currentScene;
         private float m_nextMirrorCheck;
+        private float m_nextNetTick;
 
         private static readonly FieldInfo f_networkingPeer = AccessTools.Field(typeof(PhotonNetwork), "networkingPeer");
         private static readonly FieldInfo f_photonViewList = f_networkingPeer == null ? null : AccessTools.Field(f_networkingPeer.FieldType, "photonViewList");
         private static readonly FieldInfo f_aiStates = AccessTools.Field(typeof(CharacterAI), "m_aiStates");
         private static readonly FieldInfo f_aiStatesRoot = AccessTools.Field(typeof(CharacterAI), "m_aiStatesRoot");
+        private static readonly FieldInfo f_nameLocKey = AccessTools.Field(typeof(Character), "m_nameLocKey");
+        private static readonly FieldInfo f_name = AccessTools.Field(typeof(Character), "m_name");
 
         private void Awake()
         {
@@ -68,32 +103,54 @@ namespace IncreasedEnemyCount
 
         private void ProcessScene(Scene scene)
         {
-            if (!Plugin.Enabled.Value || Plugin.EnemyMultiplier.Value <= 1)
-                return;
+            var roots = scene.GetRootGameObjects();
 
-            // Only the host decides how many enemies exist. A joining co-op client would otherwise
-            // create local-only copies the host doesn't know about.
-            if (PhotonNetwork.isNonMasterClientInRoom)
-            {
-                Plugin.Log.LogInfo($"[{scene.name}] Not the host - leaving enemy counts alone.");
-                return;
-            }
-
+            // ---- 1. Which enemies could be copied. Uses only things that are identical on every
+            //         machine (components, factions), never names, so the list and its order match.
             var candidates = new List<Character>();
-            var bakedViewIDs = new HashSet<int>();
-            foreach (var root in scene.GetRootGameObjects())
-            {
-                candidates.AddRange(root.GetComponentsInChildren<Character>(true));
-                foreach (var pv in root.GetComponentsInChildren<PhotonView>(true))
-                    if (pv.viewID != 0)
-                        bakedViewIDs.Add(pv.viewID);
-            }
-
+            foreach (var root in roots)
+                foreach (var c in root.GetComponentsInChildren<Character>(true))
+                    if (IsCandidate(c))
+                        candidates.Add(c);
             if (candidates.Count == 0)
                 return;
 
-            int copies = Plugin.EnemyMultiplier.Value - 1;
-            int cloned = 0, skippedBoss = 0, considered = 0;
+            // ---- 2. Which settings to use (in co-op: always the host's).
+            var settings = NetSync.ResolveSettingsForScene(scene.name, out string settingsSource);
+            if (settings == null)
+            {
+                Plugin.Log.LogMessage($"[{scene.name}] The host doesn't have Increased Enemy Count - leaving enemies alone.");
+                m_currentScene = null;
+                return;
+            }
+
+            if (settings.Copies > 0 && NetSync.IsOnline && NetSync.IsHost && Plugin.RequireModOnAllPlayers.Value)
+            {
+                var missing = NetSync.PlayersWithoutMod();
+                if (missing.Count > 0)
+                {
+                    NetSync.Notify($"{string.Join(", ", missing.ToArray())} {(missing.Count == 1 ? "doesn't" : "don't")} have Increased Enemy Count, so no extra enemies were added in this area.");
+                    settings = settings.WithEnabled(false);
+                }
+            }
+
+            var state = new SceneState { SceneName = scene.name, CandidateCount = candidates.Count, Copies = settings.Copies };
+            m_currentScene = state;
+
+            int copies = settings.Copies;
+            if (copies <= 0)
+            {
+                NetSync.PublishArea(scene.name, settings, candidates.Count, state.CopiedIndices);
+                return;
+            }
+
+            if (NetSync.IsOnline)
+                Plugin.Log.LogInfo($"[{scene.name}] Using settings from {settingsSource}: {settings}.");
+
+            // ---- 3. Copy.
+            var allocator = new ViewIDAllocator(FirstCopyOwnerFor(scene));
+            var liveViews = GetLivePhotonViews();
+            int cloned = 0, skippedBoss = 0, skippedExcluded = 0, outOfIDs = 0;
 
             // Inactive holder: anything instantiated under it does not Awake until re-parented.
             var holder = new GameObject("IncreasedEnemyCount_Holder");
@@ -102,34 +159,60 @@ namespace IncreasedEnemyCount
 
             try
             {
-                foreach (var original in candidates)
+                for (int i = 0; i < candidates.Count; i++)
                 {
-                    if (!IsEnemy(original))
-                        continue;
+                    var original = candidates[i];
 
-                    considered++;
+                    // Network IDs are handed out for every candidate, whether or not it ends up
+                    // being copied. That way a different decision about one enemy on one machine
+                    // (e.g. a name-based check in another game language) can't shift the IDs of
+                    // every enemy after it.
+                    int viewsPerCopy = CountViews(original);
+                    int[] ids = allocator.Take(viewsPerCopy * copies);
+
                     string name = SafeName(original);
                     float hp = SafeBaseMaxHealth(original);
-                    bool isBoss = IsBoss(original, name, hp, out string bossReason);
+                    bool isBoss = IsBoss(original, settings, hp, out string bossReason);
+                    bool excluded = MatchesAnyName(original, settings.ExcludedNames);
 
                     if (Plugin.LogEachEnemy.Value)
                     {
                         Plugin.Log.LogInfo($"[{scene.name}] {name} | HP {hp:0} | faction {original.Faction} | " +
-                                           (isBoss ? $"BOSS ({bossReason})" : "normal") +
+                                           (excluded ? "EXCLUDED" : isBoss ? $"BOSS ({bossReason})" : "normal") +
                                            (original.gameObject.activeInHierarchy ? "" : " | currently inactive"));
                     }
 
-                    if (isBoss && !Plugin.IncludeBosses.Value)
+                    if (excluded)
+                    {
+                        skippedExcluded++;
+                        continue;
+                    }
+                    if (isBoss && !settings.IncludeBosses)
                     {
                         skippedBoss++;
                         continue;
                     }
+                    if (ids == null)
+                    {
+                        outOfIDs++;
+                        continue;
+                    }
+                    if (string.IsNullOrEmpty(original.UID.Value) && NetSync.IsOnline)
+                        continue; // its copies' UIDs couldn't be made to match across machines
 
+                    bool any = false;
                     for (int k = 1; k <= copies; k++)
                     {
-                        if (CreateClone(scene, holder.transform, original, k, copies, bakedViewIDs))
+                        var slice = new int[viewsPerCopy];
+                        Array.Copy(ids, (k - 1) * viewsPerCopy, slice, 0, viewsPerCopy);
+                        if (CreateClone(scene, holder.transform, original, i, k, copies, slice, settings.Spacing, liveViews))
+                        {
                             cloned++;
+                            any = true;
+                        }
                     }
+                    if (any)
+                        state.CopiedIndices.Add(i);
                 }
             }
             finally
@@ -137,22 +220,30 @@ namespace IncreasedEnemyCount
                 Destroy(holder);
             }
 
-            Plugin.Log.LogMessage($"[{scene.name}] Enemies found: {considered}, copies created: {cloned}, bosses left alone: {skippedBoss}.");
+            NetSync.PublishArea(scene.name, settings, candidates.Count, state.CopiedIndices);
+
+            Plugin.Log.LogMessage($"[{scene.name}] Enemies found: {candidates.Count}, copies created: {cloned}, bosses left alone: {skippedBoss}" +
+                                  (skippedExcluded > 0 ? $", excluded by name: {skippedExcluded}" : "") + ".");
+            if (outOfIDs > 0)
+                Plugin.Log.LogWarning($"[{scene.name}] Ran out of network IDs for this area: {outOfIDs} enemies weren't copied.");
         }
 
         // ------------------------------------------------------------------ filtering
 
-        private bool IsEnemy(Character c)
+        /// <summary>Structural check only - must give the same answer on every machine.</summary>
+        private bool IsCandidate(Character c)
         {
             if (!c)
                 return false;
 
             // Never copy our own copies.
-            if (c.gameObject.name.Contains(CLONE_SUFFIX) && m_recordsByCloneUID.ContainsKey(c.UID.Value ?? ""))
+            if (m_recordsByCloneUID.ContainsKey(c.UID.Value ?? ""))
                 return false;
 
-            // AI only (players, and anything without an AI brain, are skipped).
-            if (!c.GetComponent<CharacterAI>() && !c.GetComponent<EditorCharacterAILoadAI>())
+            // AI only. Uses the same marker the game's own Character.IsAI checks. Not CharacterAI:
+            // on co-op clients the game deletes that component during loading (the host runs the AI),
+            // so checking it could give a different answer on different machines.
+            if (!c.GetComponent<EditorCharacterAILoadAI>())
                 return false;
 
             // Friendly town NPCs, merchants and unaligned characters.
@@ -168,31 +259,39 @@ namespace IncreasedEnemyCount
                     return false;
             }
 
-            if (NameMatchesList(SafeName(c), Plugin.ExcludedNames.Value))
-                return false;
-
             return true;
         }
 
-        private static bool IsBoss(Character c, string name, float hp, out string reason)
+        private static bool IsBoss(Character c, EnemySettings s, float hp, out string reason)
         {
             reason = null;
-            if (Plugin.QuestTargetsAreBosses.Value && c.GetComponent<QuestEventOnDeath>())
+            if (s.QuestTargetsAreBosses && c.GetComponent<QuestEventOnDeath>())
             {
                 reason = "quest target";
                 return true;
             }
-            if (Plugin.BossHealthThreshold.Value > 0f && hp >= Plugin.BossHealthThreshold.Value)
+            if (s.BossHealthThreshold > 0f && hp >= s.BossHealthThreshold)
             {
-                reason = $"health >= {Plugin.BossHealthThreshold.Value:0}";
+                reason = $"health >= {s.BossHealthThreshold:0}";
                 return true;
             }
-            if (NameMatchesList(name, Plugin.BossNameKeywords.Value))
+            if (MatchesAnyName(c, s.BossNameKeywords))
             {
                 reason = "name keyword";
                 return true;
             }
             return false;
+        }
+
+        /// <summary>Checks the displayed name and the game's internal names.</summary>
+        private static bool MatchesAnyName(Character c, string commaList)
+        {
+            if (string.IsNullOrEmpty(commaList))
+                return false;
+            return NameMatchesList(SafeName(c), commaList)
+                || NameMatchesList(c.gameObject.name, commaList)
+                || NameMatchesList(f_name?.GetValue(c) as string, commaList)
+                || NameMatchesList(f_nameLocKey?.GetValue(c) as string, commaList);
         }
 
         private static bool NameMatchesList(string name, string commaList)
@@ -231,13 +330,14 @@ namespace IncreasedEnemyCount
 
         // ------------------------------------------------------------------ cloning
 
-        private bool CreateClone(Scene scene, Transform holder, Character original, int index, int totalCopies, HashSet<int> bakedViewIDs)
+        private bool CreateClone(Scene scene, Transform holder, Character original, int candidateIndex, int index, int totalCopies,
+                                 int[] viewIDs, float spacing, Dictionary<int, PhotonView> liveViews)
         {
             GameObject cloneGO = null;
             try
             {
                 Transform origT = original.transform;
-                Vector3 offset = ComputeOffset(origT, index, totalCopies);
+                Vector3 offset = ComputeOffset(origT, index, totalCopies, spacing);
 
                 cloneGO = Instantiate(original.gameObject, origT.position, origT.rotation, holder);
                 cloneGO.name = original.gameObject.name + CLONE_SUFFIX + index;
@@ -245,39 +345,39 @@ namespace IncreasedEnemyCount
 
                 var clone = cloneGO.GetComponent<Character>();
 
-                // --- unique character UID (deterministic, so the area save keeps track of it)
+                // --- unique character UID (deterministic: matches across machines and save files)
                 string origUID = original.UID.Value;
                 string cloneUID = string.IsNullOrEmpty(origUID) ? null : origUID + CLONE_SUFFIX + index;
                 clone.SetUID(cloneUID == null ? UID.Empty : new UID(cloneUID));
 
-                // --- unique Photon view IDs (a duplicate ID makes Photon destroy the ORIGINAL)
+                // --- network view IDs (pre-assigned; a duplicate ID makes Photon destroy the older object)
+                int v = 0;
                 foreach (var pv in cloneGO.GetComponentsInChildren<PhotonView>(true))
                 {
                     if (pv.viewID == 0)
                         continue;
-                    int newID = AllocateFreeViewID(bakedViewIDs);
-                    if (newID <= 0)
+                    int newID = viewIDs[v++];
+                    if (liveViews != null && liveViews.TryGetValue(newID, out var occupant) && occupant && occupant.gameObject.scene != scene)
                     {
-                        Plugin.Log.LogWarning($"No free network view IDs left; not copying {original.name}.");
+                        // Something outside this area (most likely another mod on this machine only)
+                        // already uses this ID. Taking it would make Photon destroy that object.
+                        Plugin.Log.LogWarning($"Network ID {newID} is already used by '{occupant.name}' on this machine; skipping a copy of {original.name}. " +
+                                              "In co-op this copy will be missing for this player.");
                         DestroyImmediate(cloneGO);
                         return false;
                     }
                     pv.viewID = newID;
-                    bakedViewIDs.Add(newID);
+                    // The setter derived a (fictional) owner from the ID; make it an area object
+                    // instead, owned by nobody, so whoever hosts controls it - like the original.
+                    pv.ownerId = 0;
                 }
 
-                // --- other things that carry their own UID
-                foreach (var holderComp in cloneGO.GetComponentsInChildren<MonoBehaviour>(true))
+                // --- other things that carry their own UID (deterministic too)
+                foreach (var comp in cloneGO.GetComponentsInChildren<MonoBehaviour>(true))
                 {
-                    if (holderComp is Character || holderComp is AISquad)
+                    if (comp is Character || comp is AISquad)
                         continue;
-                    if (holderComp is Item item)
-                    {
-                        // Let the game generate fresh item UIDs.
-                        item.SetHolderUID(UID.Empty);
-                        continue;
-                    }
-                    if (holderComp is IUIDHolder uidHolder && !uidHolder.HolderUID.IsNull)
+                    if (comp is IUIDHolder uidHolder && !uidHolder.HolderUID.IsNull)
                         uidHolder.SetHolderUID(new UID(uidHolder.HolderUID.Value + CLONE_SUFFIX + index));
                 }
 
@@ -307,13 +407,24 @@ namespace IncreasedEnemyCount
                 // From this point the clone may be awake (if its parent chain is active).
                 RegisterWithSquad(cloneGO, original);
 
+                // Co-op clients only add a character to the game's character list if Photon calls it
+                // an area object, which it judges from the view ID. Copies' IDs are outside that
+                // range, so add them here. (The host adds every character regardless.)
+                if (cloneUID != null && NetSync.IsOnline && !PhotonNetwork.isMasterClient && CharacterManager.Instance)
+                    CharacterManager.Instance.AddCharacter(clone);
+
                 var record = new CloneRecord
                 {
+                    SceneName = scene.name,
+                    CandidateIndex = candidateIndex,
                     Original = original,
                     Clone = clone,
                     OriginalUID = origUID,
                     CloneUID = cloneUID,
                     Offset = offset,
+                    Spacing = spacing,
+                    CopyIndex = index,
+                    TotalCopies = totalCopies,
                     OriginalWasActive = original.gameObject.activeSelf
                 };
                 m_records.Add(record);
@@ -397,11 +508,9 @@ namespace IncreasedEnemyCount
             return c;
         }
 
-        /// <summary>Spread copies around the original, snapped to ground / nav mesh.</summary>
-        private static Vector3 ComputeOffset(Transform origT, int index, int totalCopies)
+        /// <summary>Spread copies around the original, snapped to ground / nav mesh. Deterministic.</summary>
+        private static Vector3 ComputeOffset(Transform origT, int index, int totalCopies, float spacing)
         {
-            float spacing = Plugin.SpawnSpacing.Value;
-            // Deterministic per enemy so reloads put copies in the same spot.
             float baseAngle = Mathf.Abs(origT.position.x * 13.7f + origT.position.z * 7.3f) % 360f;
             float angle = baseAngle + index * (360f / (totalCopies + 1));
             Vector3 dir = Quaternion.Euler(0f, angle, 0f) * Vector3.forward;
@@ -412,15 +521,9 @@ namespace IncreasedEnemyCount
 
             if (NavMesh.SamplePosition(target, out NavMeshHit navHit, 2.5f, NavMesh.AllAreas))
                 target = navHit.position + Vector3.up * 0.1f;
-            else if (!NavMesh.SamplePosition(origT.position, out _, 2.5f, NavMesh.AllAreas))
-            {
-                // Original isn't on a nav mesh either (flying / scripted enemy) - just keep the raw offset.
-            }
-            else
-            {
-                // Couldn't find walkable ground at the offset: stay close to the original instead.
-                target = origT.position + dir * 0.75f;
-            }
+            else if (NavMesh.SamplePosition(origT.position, out _, 2.5f, NavMesh.AllAreas))
+                target = origT.position + dir * 0.75f; // no walkable ground at the offset: stay close
+            // else: original isn't on a nav mesh either (flying / scripted enemy) - keep the raw offset
 
             return target - origT.position;
         }
@@ -431,13 +534,9 @@ namespace IncreasedEnemyCount
             if (!member)
                 return;
 
-            var squad = original.GetComponentInParent<AISquad>();
-            if (!squad)
-            {
-                // GetComponentInParent ignores inactive parents; walk up manually.
-                for (var t = original.transform.parent; t && !squad; t = t.parent)
-                    squad = t.GetComponent<AISquad>();
-            }
+            AISquad squad = null;
+            for (var t = original.transform.parent; t && !squad; t = t.parent)
+                squad = t.GetComponent<AISquad>();
             if (!squad)
                 return;
 
@@ -452,28 +551,79 @@ namespace IncreasedEnemyCount
             squad.AddCharAI(member);
         }
 
-        private static int AllocateFreeViewID(HashSet<int> bakedViewIDs)
+        // ------------------------------------------------------------------ network view IDs
+
+        private static int CountViews(Character c)
         {
-            Dictionary<int, PhotonView> live = null;
+            int n = 0;
+            foreach (var pv in c.GetComponentsInChildren<PhotonView>(true))
+                if (pv.viewID != 0)
+                    n++;
+            return n;
+        }
+
+        /// <summary>First fictional owner number for an area. Same on every machine.</summary>
+        private static int FirstCopyOwnerFor(Scene scene)
+        {
+            int key = scene.buildIndex >= 0 ? scene.buildIndex : StableHash(scene.name);
+            return COPY_OWNER_BASE + (int)((uint)key % AREA_BLOCKS) * OWNERS_PER_AREA;
+        }
+
+        private static int StableHash(string s)
+        {
+            unchecked
+            {
+                uint h = 2166136261;
+                foreach (char ch in s ?? "")
+                    h = (h ^ ch) * 16777619;
+                return (int)(h & 0x7fffffff);
+            }
+        }
+
+        /// <summary>Hands out IDs in a fixed order: owner x 1000 + 1..999, then the next owner.</summary>
+        private sealed class ViewIDAllocator
+        {
+            private readonly int m_lastOwner;
+            private int m_owner;
+            private int m_slot;
+
+            public ViewIDAllocator(int firstOwner)
+            {
+                m_owner = firstOwner;
+                m_lastOwner = firstOwner + OWNERS_PER_AREA - 1;
+                m_slot = 0;
+            }
+
+            /// <summary>Returns <paramref name="count"/> IDs, or null if there aren't enough left.</summary>
+            public int[] Take(int count)
+            {
+                var result = new int[count];
+                for (int i = 0; i < count; i++)
+                {
+                    m_slot++;
+                    if (m_slot >= PhotonNetwork.MAX_VIEW_IDS)
+                    {
+                        m_owner++;
+                        m_slot = 1; // slot 0 would make owner x 1000, fine, but skip it like Photon does
+                    }
+                    if (m_owner > m_lastOwner)
+                        return null;
+                    result[i] = m_owner * PhotonNetwork.MAX_VIEW_IDS + m_slot;
+                }
+                return result;
+            }
+        }
+
+        private static Dictionary<int, PhotonView> GetLivePhotonViews()
+        {
             try
             {
                 var peer = f_networkingPeer?.GetValue(null);
                 if (peer != null)
-                    live = f_photonViewList?.GetValue(peer) as Dictionary<int, PhotonView>;
+                    return f_photonViewList?.GetValue(peer) as Dictionary<int, PhotonView>;
             }
             catch { }
-
-            // Scene-owned IDs (owner 0) keep the copy behaving exactly like the original.
-            // Search from the top of the range down, away from the low IDs the scenes use.
-            for (int id = PhotonNetwork.MAX_VIEW_IDS - 1; id > 0; id--)
-            {
-                if (bakedViewIDs.Contains(id))
-                    continue;
-                if (live != null && live.ContainsKey(id))
-                    continue;
-                return id;
-            }
-            return -1;
+            return null;
         }
 
         // ------------------------------------------------------------------ save handling
@@ -524,12 +674,75 @@ namespace IncreasedEnemyCount
             }
         }
 
-        // ------------------------------------------------------------------ activation mirroring
+        // ------------------------------------------------------------------ per-frame work
+
+        private void Update()
+        {
+            if (Time.unscaledTime >= m_nextNetTick)
+            {
+                m_nextNetTick = Time.unscaledTime + 1f;
+                NetSync.Tick();
+                ReconcileWithHost();
+            }
+
+            MirrorActivation();
+        }
+
+        /// <summary>
+        /// Co-op client: once the host says which enemies it copied in this area, remove any copies
+        /// this machine made that the host didn't (they'd be frozen, since the host never controls
+        /// them), and report copies the host has that this machine is missing.
+        /// </summary>
+        private void ReconcileWithHost()
+        {
+            var state = m_currentScene;
+            if (state == null || state.Reconciled || !NetSync.IsOnline || NetSync.IsHost)
+                return;
+            if (!NetSync.TryGetHostManifest(state.SceneName, out int hostCopies, out int hostCandidates, out var hostIndices))
+                return;
+
+            state.Reconciled = true;
+
+            if (hostCandidates != state.CandidateCount || hostCopies != state.Copies)
+            {
+                NetSync.Notify($"Your copy of this area doesn't match the host's ({state.CandidateCount} enemies x{state.Copies + 1} here, " +
+                               $"{hostCandidates} x{hostCopies + 1} on the host). Leave and re-enter the area. " +
+                               "If it keeps happening, check that everyone has the same mods.");
+                return;
+            }
+
+            int removed = 0;
+            for (int i = m_records.Count - 1; i >= 0; i--)
+            {
+                var r = m_records[i];
+                if (r.SceneName != state.SceneName || hostIndices.Contains(r.CandidateIndex))
+                    continue;
+                if (r.Clone)
+                    Destroy(r.Clone.gameObject);
+                if (r.CloneUID != null)
+                    m_recordsByCloneUID.Remove(r.CloneUID);
+                m_records.RemoveAt(i);
+                removed++;
+            }
+
+            int missing = 0;
+            foreach (int i in hostIndices)
+                if (!state.CopiedIndices.Contains(i))
+                    missing++;
+
+            if (removed > 0 || missing > 0)
+            {
+                Plugin.Log.LogWarning($"[{state.SceneName}] Matched the host's enemy copies: removed {removed} extra, {missing} enemies' copies are missing here.");
+                if (missing > 0)
+                    NetSync.Notify($"{missing} of the host's extra enemies couldn't be created on your side, so they may be invisible to you. " +
+                                   "Make sure everyone uses the same game language and mods.");
+            }
+        }
 
         // Some enemies start switched off and are switched on by a script (ambushes, co-op extras,
         // event spawns). Those scripts only know about the original, so when the original turns
         // on, turn its copies on too.
-        private void Update()
+        private void MirrorActivation()
         {
             if (m_records.Count == 0 || Time.unscaledTime < m_nextMirrorCheck)
                 return;
@@ -550,7 +763,7 @@ namespace IncreasedEnemyCount
                 {
                     try
                     {
-                        Vector3 pos = r.Original.transform.position + ComputeOffset(r.Original.transform, 1, 1);
+                        Vector3 pos = r.Original.transform.position + ComputeOffset(r.Original.transform, r.CopyIndex, r.TotalCopies, r.Spacing);
                         r.Clone.transform.position = pos;
                         r.Clone.transform.rotation = r.Original.transform.rotation;
                         r.Clone.gameObject.SetActive(true);
