@@ -11,7 +11,7 @@ namespace IncreasedEnemyCount
     {
         public const string GUID = "catalysten.increasedenemycount";
         public const string NAME = "Increased Enemy Count";
-        public const string VERSION = "1.2.0";
+        public const string VERSION = "1.2.3";
 
         internal static Plugin Instance;
         internal static ManualLogSource Log;
@@ -42,6 +42,7 @@ namespace IncreasedEnemyCount
 
         // Debug
         internal static ConfigEntry<bool> LogEachEnemy;
+        internal static ConfigEntry<string> InspectEnemies;
 
         private EnemyDoubler m_doubler;
 
@@ -111,6 +112,11 @@ namespace IncreasedEnemyCount
             LogEachEnemy = Config.Bind("Debug", "LogEachEnemy", true, new ConfigDescription(
                 "Write one line per enemy to the BepInEx log (name, health, type and how many copies). Useful for checking the boss and unique lists.", null,
                 new ConfigurationManagerAttributes { Order = 100, DispName = "Log each enemy" }));
+            InspectEnemies = Config.Bind("Debug", "InspectEnemies", "", new ConfigDescription(
+                "For troubleshooting. Comma-separated keywords: matching enemies get a detailed report in the BepInEx log when " +
+                "their area loads, and every change in the state of the original and its copies is logged while you play. " +
+                "Leave empty normally.", null,
+                new ConfigurationManagerAttributes { Order = 90, DispName = "Inspect enemies (keywords)" }));
 
             AudioVoiceLimit.Apply(MaxAudibleSounds.Value);
 

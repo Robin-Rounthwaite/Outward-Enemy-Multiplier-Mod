@@ -23,7 +23,7 @@ namespace IncreasedEnemyCount
     /// </summary>
     internal static class NetSync
     {
-        public const string PROTOCOL = "4"; // bump whenever copies would come out differently (IDs, UIDs, order)
+        public const string PROTOCOL = "5"; // bump whenever copies would come out differently (IDs, UIDs, order)
 
         private const string KEY_CFG = "iec.cfg";
         private const string KEY_AREA = "iec.area";

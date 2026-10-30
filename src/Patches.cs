@@ -14,6 +14,16 @@ namespace IncreasedEnemyCount
             EnemyDoubler.Instance?.ApplySavesToClones(_saves);
         }
 
+        // Quest/dialogue scripts change some characters' factions at runtime (e.g. slavers that are
+        // peaceful until you escape). SendChangeFaction is the RPC that applies a faction change
+        // on every machine, whether or not it was sent over the network.
+        [HarmonyPatch(typeof(Character), "SendChangeFaction")]
+        [HarmonyPostfix]
+        private static void SendChangeFaction_Postfix(Character __instance)
+        {
+            EnemyDoubler.Instance?.OnFactionChanged(__instance);
+        }
+
         // Unity can only play a limited number of sounds at once and silently drops the
         // lowest-priority ones past that. With many enemies, their footsteps and idle sounds
         // compete with the music at the same default priority, so the music sometimes cut out.

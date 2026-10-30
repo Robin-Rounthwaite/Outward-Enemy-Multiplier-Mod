@@ -6,7 +6,7 @@
 #   1. Bump "version_number" in thunderstore\manifest.json
 #   2. Bump VERSION in src\Plugin.cs (and AssemblyInfo.cs) to the same number
 #   3. Add an entry to thunderstore\CHANGELOG.md
-#   4. Run this script, then upload thunderstore\dist\IncreasedEnemyCount-<version>.zip
+#   4. Run this script, then upload thunderstore\dist\<name>-<version>.zip (name from manifest.json)
 
 $ErrorActionPreference = 'Stop'
 $here    = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -40,7 +40,7 @@ if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory $stage | Out-Null
 Copy-Item $dll, (Join-Path $here 'manifest.json'), (Join-Path $here 'README.md'), (Join-Path $here 'CHANGELOG.md'), (Join-Path $here 'icon.png') $stage
 
-$zip = Join-Path $here "dist\IncreasedEnemyCount-$version.zip"
+$zip = Join-Path $here "dist\$($manifest.name)-$version.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
 Remove-Item $stage -Recurse -Force

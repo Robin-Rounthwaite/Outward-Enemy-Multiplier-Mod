@@ -53,6 +53,8 @@ namespace IncreasedEnemyCount
             public int CopyIndex;
             public int TotalCopies;
             public bool OriginalWasActive;
+            /// <summary>Hidden because a quest/dialogue script made the original peaceful.</summary>
+            public bool HiddenWhilePeaceful;
         }
 
         private class SceneState
@@ -104,6 +106,7 @@ namespace IncreasedEnemyCount
         private void ProcessScene(Scene scene)
         {
             var roots = scene.GetRootGameObjects();
+            EnemyInspector.ClearTracking();
 
             // ---- 1. Which enemies could be copied. Uses only things that are identical on every
             //         machine (components, factions), never names, so the list and its order match.
@@ -182,6 +185,10 @@ namespace IncreasedEnemyCount
                                            (original.gameObject.activeInHierarchy ? "" : " | currently inactive"));
                     }
 
+                    bool inspect = EnemyInspector.Wants(original, name);
+                    if (inspect)
+                        EnemyInspector.Report(scene, original, name);
+
                     if (how == "excluded")
                     {
                         skippedExcluded++;
@@ -204,6 +211,14 @@ namespace IncreasedEnemyCount
                         Array.Copy(ids, (k - 1) * viewsPerCopy, slice, 0, viewsPerCopy);
                         if (CreateClone(scene, holder.transform, original, i, k, copies, slice, settings.Spacing, liveViews))
                             made++;
+                    }
+                    if (inspect)
+                    {
+                        var clones = new List<Character>();
+                        foreach (var r in m_records)
+                            if (r.Original == original && r.Clone)
+                                clones.Add(r.Clone);
+                        EnemyInspector.Track(original, name, clones);
                     }
                     if (made > 0)
                     {
@@ -247,7 +262,7 @@ namespace IncreasedEnemyCount
                 return false;
 
             // Friendly town NPCs, merchants and unaligned characters.
-            if (c.Faction == Character.Factions.NONE || c.Faction == Character.Factions.Player || c.Faction == Character.Factions.Merchants)
+            if (IsPeacefulFaction(c.Faction))
                 return false;
 
             // Anyone you can talk to, trade with or train under.
@@ -319,6 +334,11 @@ namespace IncreasedEnemyCount
             if (string.IsNullOrEmpty(n))
                 n = c.gameObject.name;
             return n;
+        }
+
+        private static bool SafeAlive(Character c)
+        {
+            try { return c.Alive; } catch { return true; }
         }
 
         private static float SafeBaseMaxHealth(Character c)
@@ -631,6 +651,88 @@ namespace IncreasedEnemyCount
             return null;
         }
 
+        // ------------------------------------------------------------------ peaceful originals
+
+        /// <summary>Factions that never fight the player.</summary>
+        internal static bool IsPeacefulFaction(Character.Factions f)
+        {
+            return f == Character.Factions.NONE || f == Character.Factions.Player || f == Character.Factions.Merchants;
+        }
+
+        /// <summary>
+        /// Called whenever any character's faction changes (on every machine in co-op).
+        /// Quest and dialogue scripts switch some enemies between hostile and peaceful while the
+        /// game runs (e.g. the Vendavel slavers while you're enslaved, the friendly Immaculate).
+        /// Those scripts only know about the original, so: while an original is peaceful its
+        /// copies are hidden, and when it turns hostile again they come back with its faction.
+        /// </summary>
+        internal void OnFactionChanged(Character original)
+        {
+            try
+            {
+                if (!original || m_records.Count == 0)
+                    return;
+
+                // Taming a Pearlbird (Pearlbird mask) also makes it friendly, but each copy is
+                // tamed on its own, so leave those alone.
+                if (original.GetComponentInChildren<AIFamiliarRoot>(true))
+                    return;
+
+                var faction = original.Faction;
+                bool peaceful = IsPeacefulFaction(faction);
+                int hidden = 0, shown = 0;
+
+                foreach (var r in m_records)
+                {
+                    if (r.Original != original || !r.Clone)
+                        continue;
+
+                    if (peaceful)
+                    {
+                        if (!r.HiddenWhilePeaceful)
+                        {
+                            r.HiddenWhilePeaceful = true;
+                            if (r.Clone.gameObject.activeSelf)
+                                r.Clone.gameObject.SetActive(false);
+                            hidden++;
+                        }
+                        continue;
+                    }
+
+                    // Hostile: copy the faction (it may have switched between hostile factions too).
+                    if (r.Clone.Faction != faction)
+                    {
+                        if (r.Clone.DetectabilityEmitter)
+                            r.Clone.ChangeFaction(faction, false);
+                        else
+                            r.Clone.Faction = faction; // not woken up yet; its Awake will use this
+                    }
+
+                    if (r.HiddenWhilePeaceful)
+                    {
+                        r.HiddenWhilePeaceful = false;
+                        if (original.gameObject.activeSelf && original.Alive && !r.Clone.gameObject.activeSelf)
+                        {
+                            r.Clone.transform.position = original.transform.position +
+                                ComputeOffset(original.transform, r.CopyIndex, r.TotalCopies, r.Spacing);
+                            r.Clone.transform.rotation = original.transform.rotation;
+                            r.Clone.gameObject.SetActive(true);
+                        }
+                        shown++;
+                    }
+                }
+
+                if (hidden > 0)
+                    Plugin.Log.LogInfo($"{SafeName(original)} became peaceful ({faction}); hid {hidden} cop{(hidden == 1 ? "y" : "ies")}.");
+                if (shown > 0)
+                    Plugin.Log.LogInfo($"{SafeName(original)} became hostile ({faction}); brought back {shown} cop{(shown == 1 ? "y" : "ies")}.");
+            }
+            catch (Exception e)
+            {
+                Plugin.Log.LogWarning($"Could not update copies after a faction change: {e.Message}");
+            }
+        }
+
         // ------------------------------------------------------------------ save handling
 
         internal void ApplySavesToClones(CharacterSaveData[] saves)
@@ -691,6 +793,7 @@ namespace IncreasedEnemyCount
             }
 
             MirrorActivation();
+            EnemyInspector.Tick();
         }
 
         /// <summary>
@@ -771,6 +874,16 @@ namespace IncreasedEnemyCount
                 }
 
                 bool origActive = r.Original.gameObject.activeSelf;
+
+                // Keep copies of peaceful originals hidden (e.g. if loading a save switched them back on).
+                if (r.HiddenWhilePeaceful)
+                {
+                    if (r.Clone.gameObject.activeSelf)
+                        r.Clone.gameObject.SetActive(false);
+                    r.OriginalWasActive = origActive;
+                    continue;
+                }
+
                 if (origActive && !r.OriginalWasActive && !r.Clone.gameObject.activeSelf)
                 {
                     try
@@ -784,6 +897,16 @@ namespace IncreasedEnemyCount
                     {
                         Plugin.Log.LogWarning($"Could not activate copy of {r.Original.name}: {e.Message}");
                     }
+                }
+                else if (!origActive && r.OriginalWasActive && r.Clone.gameObject.activeSelf && SafeAlive(r.Original))
+                {
+                    // A script switched a living original off (e.g. the hostile Immaculate in a
+                    // Chersonese dungeon, which is swapped for a friendly NPC version). Switch its
+                    // copies off too; they come back above if the original is switched on again.
+                    // Dead originals are skipped, so a copy that's still fighting doesn't vanish
+                    // when the game tidies away the original's body.
+                    r.Clone.gameObject.SetActive(false);
+                    Plugin.Log.LogInfo($"{SafeName(r.Original)} was switched off by the game; hid its copy {r.CopyIndex}.");
                 }
                 r.OriginalWasActive = origActive;
             }
