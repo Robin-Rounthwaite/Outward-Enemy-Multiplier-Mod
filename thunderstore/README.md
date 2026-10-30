@@ -1,4 +1,4 @@
-# Increased Enemy Count
+# Enemy Multiplier
 
 More enemies in every encounter. Every bandit camp, hyena pack, dungeon, unique enemy and boss gets 2x the enemies by default, up to 10x. Standard enemies, unique enemies and bosses each have their own slider.
 
