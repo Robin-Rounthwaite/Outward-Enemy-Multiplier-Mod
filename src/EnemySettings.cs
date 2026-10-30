@@ -9,15 +9,17 @@ namespace IncreasedEnemyCount
     /// </summary>
     internal sealed class EnemySettings
     {
-        private const string FORMAT = "2";
+        private const string FORMAT = "3";
         private const char SEP = '\u001f';
 
         /// <summary>
-        /// Network IDs are reserved for this many copies of every candidate enemy, whatever the
-        /// sliders say, so IDs never depend on settings or on how an enemy was classified.
-        /// Matches the highest slider value (10x = 9 copies).
+        /// Highest multiplier allowed (Advanced.MaxMultiplier). Network IDs are reserved for
+        /// MaxMultiplier - 1 copies of every candidate enemy, whatever the sliders say, so IDs never
+        /// depend on the sliders or on how an enemy was classified. In co-op this is the host's value.
         /// </summary>
-        public const int MAX_COPIES = 9;
+        public int MaxMultiplier;
+
+        public int MaxCopies => Math.Max(1, MaxMultiplier) - 1;
 
         public bool Enabled;
         public int StandardMultiplier;
@@ -40,7 +42,7 @@ namespace IncreasedEnemyCount
                 case EnemyCategory.Unique: m = UniqueMultiplier; break;
                 default: m = StandardMultiplier; break;
             }
-            return Math.Max(0, Math.Min(MAX_COPIES, m - 1));
+            return Math.Max(0, Math.Min(MaxCopies, m - 1));
         }
 
         public static EnemySettings FromConfig()
@@ -51,6 +53,7 @@ namespace IncreasedEnemyCount
                 StandardMultiplier = Plugin.StandardMultiplier.Value,
                 UniqueMultiplier = Plugin.UniqueMultiplier.Value,
                 BossMultiplier = Plugin.BossMultiplier.Value,
+                MaxMultiplier = Plugin.MaxMultiplier.Value,
                 Spacing = Plugin.SpawnSpacing.Value,
                 ExcludedNames = Plugin.ExcludedNames.Value ?? "",
                 IncludedNames = Plugin.IncludedNames.Value ?? "",
@@ -74,6 +77,7 @@ namespace IncreasedEnemyCount
                 StandardMultiplier.ToString(inv),
                 UniqueMultiplier.ToString(inv),
                 BossMultiplier.ToString(inv),
+                MaxMultiplier.ToString(inv),
                 Spacing.ToString("R", inv),
                 Clean(ExcludedNames),
                 Clean(IncludedNames),
@@ -87,7 +91,7 @@ namespace IncreasedEnemyCount
             try
             {
                 var p = data.Split(SEP);
-                if (p.Length < 8 || p[0] != FORMAT)
+                if (p.Length < 9 || p[0] != FORMAT)
                     return null;
                 var inv = CultureInfo.InvariantCulture;
                 return new EnemySettings
@@ -96,9 +100,10 @@ namespace IncreasedEnemyCount
                     StandardMultiplier = int.Parse(p[2], inv),
                     UniqueMultiplier = int.Parse(p[3], inv),
                     BossMultiplier = int.Parse(p[4], inv),
-                    Spacing = float.Parse(p[5], inv),
-                    ExcludedNames = p[6],
-                    IncludedNames = p[7],
+                    MaxMultiplier = Math.Min(Plugin.MAX_MULTIPLIER_CEILING, Math.Max(2, int.Parse(p[5], inv))),
+                    Spacing = float.Parse(p[6], inv),
+                    ExcludedNames = p[7],
+                    IncludedNames = p[8],
                 };
             }
             catch

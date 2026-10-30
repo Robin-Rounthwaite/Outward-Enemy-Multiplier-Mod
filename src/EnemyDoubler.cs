@@ -168,7 +168,7 @@ namespace IncreasedEnemyCount
                     // enemy on one machine (e.g. name matching in another game language) can't shift
                     // the IDs of every enemy after it.
                     int viewsPerCopy = CountViews(original);
-                    int[] ids = allocator.Take(viewsPerCopy * EnemySettings.MAX_COPIES);
+                    int[] ids = allocator.Take(viewsPerCopy * settings.MaxCopies);
 
                     string name = SafeName(original);
                     float hp = SafeBaseMaxHealth(original);

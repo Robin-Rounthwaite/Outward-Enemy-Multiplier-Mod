@@ -2,48 +2,38 @@
 
 More enemies in every encounter. Every bandit camp, hyena pack, dungeon, unique enemy and boss gets 2x the enemies by default, up to 10x. Standard enemies, unique enemies and bosses each have their own slider.
 
-## Features
+## Extra Features:
 
-- **Every encounter, everywhere.** Copies are made of the enemies the game places in each area, including roaming groups that appear later and ambushes that are switched on by events.
-- **Copies behave like the originals.** They wander, notice you, fight and flee like the enemy they copy, and join its group.
-- **Copies are saved like the originals.** Killed copies stay dead until the area resets, just like the originals.
-- **Quests aren't affected.** Killing a copy doesn't count twice towards a quest.
-- **Three enemy types, three sliders.** Standard enemies, unique enemies and bosses each get their own multiplier. Bosses and uniques are the ones listed on the [official Outward wiki](https://outward.wiki.gg/wiki/Enemies). You can override the lists by keyword.
-- **Co-op works, including larger [Raid Mode](https://thunderstore.io/c/outward/p/SpicerXD/Raid_Mode/) parties.** Everyone sees the same extra enemies, using the host's settings.
-- **Audio fixes for crowds.** Music no longer cuts out with hundreds of enemies around, and more sounds can play at once, so big groups don't sound choppy.
+- Want more than 10x enemies? I chose it semiarbitrarily - it felt like a fun "balanced" maximum for hard fights. If you wish the slider could move further to the right (up to 100x), you can customize the slider maximum in the BepInEx settings file. Look for the keyword MaxMultiplier in the [Advanced] section of BepInEx/config/catalysten.increasedenemycount.cfg . (You need to run the game once to generate the .cfg file).
+- This mod also fixes audio issues for crowds. In vanilla Outward, there is a hard limit of 32 sounds playing at once. The music starts to cut in and out, for example. With this mod, that limit is raised. (And music is prioritized).
 
-## Settings
+## Current limitations:
 
-Settings are in `BepInEx/config/catalysten.increasedenemycount.cfg`. You can also edit them in-game with [Outward Config Manager](https://thunderstore.io/c/outward/p/Mefino/Outward_Config_Manager/) (press F5). Most changes apply the next time an area loads.
+- Co-op is still in beta. I have added support for it, but haven't yet tested it. Raid Mode (3+ players) should be supported.
+- Oldward (non-Definitive Edition) is not supported.
+- Arena wave spawns and summoned creatures aren't multiplied.
+- High multipliers in crowded areas mean a lot of enemies: Chersonese at 10x has 760 (76 originals plus 684 copies).
 
-| Setting | Default | What it does |
-|---|---|---|
-| Standard enemies | 2 | Total of each standard enemy: 2 = double, up to 10 |
-| Unique enemies | 2 | Total of each unique enemy (e.g. Ghost of Vanasse), up to 10 |
-| Bosses | 2 | Total of each boss (e.g. Elite enemies), up to 10 |
-| Spawn spacing | 2 m | How far copies stand from the original |
-| Never copy (keywords) | — | Comma-separated keywords; matching enemies are never copied (e.g. `Pearlbird`) |
-| Always standard (keywords) | — | Comma-separated keywords; matching enemies use the standard slider, even if they're a boss or unique |
-| Require mod on all players | on | Co-op host: add no extra enemies while someone lacks the mod |
-| Keep music playing | on | Stops music cutting out in crowds |
-| Max audible sounds | 128 | Sounds that can play at once (game default 32); needs a restart |
+## Recommended Mods (not required):
+[Raid Mode](https://thunderstore.io/c/outward/p/SpicerXD/Raid_Mode/). Even for single players who just want to mess with damage dealt/received. It allows for several QOL settings, too.
+[Outward Config Manager](https://thunderstore.io/c/outward/p/Mefino/Outward_Config_Manager/) lets change all of this mod’s settings in-game with F5, instead of editing the .cfg file.
 
-Bosses and unique enemies are matched by their English names, so in other game languages every enemy uses the standard slider. "Never copy" wins over "Always standard". The BepInEx log lists every enemy with its type and how many copies it got.
+## Requirements:
 
-## Co-op
+[BepInExPack Outward](https://old.thunderstore.io/c/outward/p/BepInEx/BepInExPack_Outward/). Automatically installed when you use a mod manager.
+Follow the instructions on the wiki for setting up your game for mods: https://outward.wiki.gg/wiki/Installing_Mods
+To install this mod, use a mod manager such as r2modman (recommended) or Thunderstore Mod Manager. To install by hand, put `IncreasedEnemyCount.dll` in `BepInEx/plugins/`. 
+
+## Wonder which enemies are unique or bosses?
+
+Check out the wiki links. Wiki.gg is the official and up-to-date version of the Outward Wiki:
+[Uniques](https://outward.wiki.gg/wiki/Enemies/Unique)
+[Bosses](https://outward.wiki.gg/wiki/Enemies/Bosses)
+
+## Co-op notes:
 
 - **Everyone in the session needs the mod**, at the same version. Players without it can't see the extra enemies, but can still be hit by them. By default the host's game adds no extra enemies while someone is missing the mod, and the host gets an on-screen notice.
 - **Only the host's settings are used.** Other players' own settings don't matter in co-op.
 - **If anything doesn't match** between a player and the host (for example because of different mods), that player gets an on-screen notice. Leaving and re-entering the area usually fixes it.
 
-Co-op support is new. If you run into problems, please report them with your `BepInEx/LogOutput.log` attached.
-
-## Known limits
-
-- Arena wave spawns and summoned creatures aren't multiplied.
-- High multipliers in crowded areas mean a lot of enemies: Chersonese at 10x has 760 (76 originals plus 684 copies).
-- Removing the mod leaves a few unused entries in area saves. The game ignores them.
-
-## Installation
-
-Use a mod manager such as r2modman or Thunderstore Mod Manager. To install by hand, put `IncreasedEnemyCount.dll` in `BepInEx/plugins/`. Requires the BepInEx pack for Outward. Built for Outward: Definitive Edition.
+Co-op support is new. If you run into problems, please report them with your `BepInEx/LogOutput.log` attached. Either by making an issue on [Github](https://github.com/Robin-Rounthwaite/Outward-Enemy-Multiplier-Mod), or by finding me on the Outward Modding Community Discord. (I'm currently still in the process of adding my mod workshop there).

@@ -11,7 +11,7 @@ namespace IncreasedEnemyCount
     {
         public const string GUID = "catalysten.increasedenemycount";
         public const string NAME = "Increased Enemy Count";
-        public const string VERSION = "1.1.0";
+        public const string VERSION = "1.2.0";
 
         internal static Plugin Instance;
         internal static ManualLogSource Log;
@@ -26,6 +26,12 @@ namespace IncreasedEnemyCount
         internal static ConfigEntry<int> StandardMultiplier;
         internal static ConfigEntry<int> UniqueMultiplier;
         internal static ConfigEntry<int> BossMultiplier;
+
+        // Advanced (only in the .cfg file, hidden from Config Manager)
+        internal static ConfigEntry<int> MaxMultiplier;
+
+        /// <summary>Hard ceiling for MaxMultiplier, so a typo can't create tens of thousands of enemies.</summary>
+        internal const int MAX_MULTIPLIER_CEILING = 100;
 
         // Multiplayer
         internal static ConfigEntry<bool> RequireModOnAllPlayers;
@@ -62,19 +68,28 @@ namespace IncreasedEnemyCount
                 "and uses the standard multiplier, even if it's a boss or unique enemy." + NEXT_LOAD, null,
                 new ConfigurationManagerAttributes { Order = 70, DispName = "Always standard (keywords)" }));
 
+            MaxMultiplier = Config.Bind("Advanced", "MaxMultiplier", 10, new ConfigDescription(
+                "Highest value the three multiplier sliders can be set to (they also go up to this in the F5 menu). " +
+                $"Up to {MAX_MULTIPLIER_CEILING}. Values above 10 are untested and can hurt performance badly: every enemy in an area " +
+                "is multiplied, so 100x turns an area with 76 enemies into 7,600. Requires restarting the game. " +
+                "In online co-op the host's value is used.",
+                new AcceptableValueRange<int>(2, MAX_MULTIPLIER_CEILING),
+                new ConfigurationManagerAttributes { Browsable = false }));
+            int maxMult = MaxMultiplier.Value;
+
             const string LISTS = " Bosses and unique enemies are the ones listed on the official Outward wiki (outward.wiki.gg); " +
                                  "the names are matched in English.";
             StandardMultiplier = Config.Bind("Multipliers", "StandardEnemies", 2, new ConfigDescription(
                 "Total number of each standard enemy (everything that isn't a boss or unique enemy). 1 = unchanged, 2 = double." + NEXT_LOAD,
-                new AcceptableValueRange<int>(1, 10),
+                new AcceptableValueRange<int>(1, maxMult),
                 new ConfigurationManagerAttributes { Order = 100, DispName = "Standard enemies", ShowRangeAsPercent = false }));
             UniqueMultiplier = Config.Bind("Multipliers", "UniqueEnemies", 2, new ConfigDescription(
                 "Total number of each unique enemy (named one-off enemies like the Ghost of Vanasse). 1 = unchanged." + LISTS + NEXT_LOAD,
-                new AcceptableValueRange<int>(1, 10),
+                new AcceptableValueRange<int>(1, maxMult),
                 new ConfigurationManagerAttributes { Order = 90, DispName = "Unique enemies", ShowRangeAsPercent = false }));
             BossMultiplier = Config.Bind("Multipliers", "Bosses", 2, new ConfigDescription(
                 "Total number of each boss (Elite enemies and other arena bosses). 1 = unchanged." + LISTS + NEXT_LOAD,
-                new AcceptableValueRange<int>(1, 10),
+                new AcceptableValueRange<int>(1, maxMult),
                 new ConfigurationManagerAttributes { Order = 80, DispName = "Bosses", ShowRangeAsPercent = false }));
 
             RequireModOnAllPlayers = Config.Bind("Multiplayer", "RequireModOnAllPlayers", true, new ConfigDescription(
